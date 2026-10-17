@@ -1,0 +1,561 @@
+
+-- // GAME HOPPER v11 by BY RC7 REMAKE TEAM ON DISCORD
+-- // API real + UI com lista de jogos + botao entrar + auto hop
+-- // https://discord.gg/vPDkbQDF8
+
+if _G.HOPPER_ATIVO then _G.HOPPER_ATIVO = false task.wait(1) end
+_G.HOPPER_ATIVO = true
+
+local TS  = game:GetService("TeleportService")
+local HTS = game:GetService("HttpService")
+local PLS = game:GetService("Players")
+local CG  = game:GetService("CoreGui")
+local LP  = PLS.LocalPlayer
+
+-- // CONFIG
+local CFG = {
+    MIN_PLAYERS  = 10,
+    MAX_PLAYERS  = 100,
+    HOP_DELAY    = 10,
+    REQ_DELAY    = 1.5,
+    MAX_TENTATIVAS = 3,
+    SKIP_CURRENT = true,
+}
+
+local SORTS = {"up-and-coming","fun-with-friends","top-revisited"}
+local sortIdx = 1
+local jogosFila = {}
+local jogosLista = {} -- // pra mostrar na UI
+local hopAtivo = false
+local totalHops = 0
+local jogoAtual = "—"
+
+-- // REQUEST
+local function req(url)
+    task.wait(CFG.REQ_DELAY)
+    local ok, res = pcall(request, {
+        Url = url, Method = "GET",
+        Headers = { ["Accept"] = "application/json" }
+    })
+    if not ok or not res then return nil end
+    local s = res.StatusCode or res.Status or 0
+    if s == 429 then warn("[H] 429 rate limit — wait 5s") task.wait(5) return nil end
+    if s == 200 then return res.Body end
+    return nil
+end
+
+-- // BUSCA IDS
+local function buscarIds()
+    local sort = SORTS[sortIdx]
+    sortIdx = (sortIdx % #SORTS) + 1
+    local body = req(string.format(
+        "https://apis.roproxy.com/explore-api/v1/get-sort-content?sortId=%s&sessionId=x&startIndex=0&pageType=home&country=BR",
+        sort
+    ))
+    if not body then return {} end
+    local ok, d = pcall(HTS.JSONDecode, HTS, body)
+    if not ok or not d then return {} end
+    local ids = {}
+    for _, g in ipairs(d.games or {}) do
+        local uid = tonumber(g.universeId)
+        if uid then table.insert(ids, uid) end
+    end
+    print(string.format("[H] Sort '%s' → %d IDs", sort, #ids))
+    return ids
+end
+
+-- // BUSCA DETALHES EM LOTES
+local function buscarDetalhes(ids)
+    local todos, lote = {}, {}
+    for i, uid in ipairs(ids) do
+        table.insert(lote, uid)
+        if #lote == 10 or i == #ids then
+            local body = req("https://games.roproxy.com/v1/games?universeIds=" .. table.concat(lote,"&universeIds="))
+            if body then
+                local ok, d = pcall(HTS.JSONDecode, HTS, body)
+                if ok and d then
+                    for _, j in ipairs(d.data or {}) do
+                        table.insert(todos, j)
+                    end
+                end
+            end
+            lote = {}
+        end
+    end
+    return todos
+end
+
+-- // FILTRA E MONTA FILA
+local function buscarJogos()
+    print("[H] Buscando jogos...")
+    local ids = buscarIds()
+    if #ids == 0 then return end
+    local detalhes = buscarDetalhes(ids)
+    print(string.format("[H] %d jogos retornados", #detalhes))
+
+    for _, j in ipairs(detalhes) do
+        local pid  = tonumber(j.rootPlaceId)
+        local uid  = tonumber(j.id)
+        local play = tonumber(j.playing or 0)
+        local nome = tostring(j.name or "?")
+        local ver  = j.creator and j.creator.hasVerifiedBadge == true
+
+        if not pid or pid == 0 then continue end
+        if play < CFG.MIN_PLAYERS or play >= CFG.MAX_PLAYERS then continue end
+        if ver then continue end
+        if CFG.SKIP_CURRENT and pid == game.PlaceId then continue end
+
+        -- // evita duplicatas
+        local existe = false
+        for _, f in ipairs(jogosFila) do
+            if f.placeId == pid then existe = true break end
+        end
+        if existe then continue end
+
+        local entrada = {placeId=pid, universeId=uid, nome=nome, jogadores=play}
+        table.insert(jogosFila, entrada)
+        table.insert(jogosLista, entrada)
+
+        print(string.format("[H] ✓ %s | %d players", nome, play))
+    end
+
+    print(string.format("[H] Fila: %d jogos", #jogosFila))
+end
+
+-- // ════════════════════════════════════════════
+-- // UI
+-- // ════════════════════════════════════════════
+
+local sg = Instance.new("ScreenGui")
+sg.Name = "GHopperV11"
+sg.ResetOnSpawn = false
+sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+sg.Parent = CG
+
+-- // FRAME PRINCIPAL
+local main = Instance.new("Frame", sg)
+main.Size = UDim2.new(0,380,0,500)
+main.Position = UDim2.new(0.5,-190,0.5,-250)
+main.BackgroundColor3 = Color3.fromRGB(12,12,18)
+main.BorderSizePixel = 0
+main.Active = true
+main.Draggable = true
+Instance.new("UICorner",main).CornerRadius = UDim.new(0,12)
+local mainStroke = Instance.new("UIStroke",main)
+mainStroke.Color = Color3.fromRGB(70,70,220)
+mainStroke.Thickness = 1.5
+
+-- // TOPBAR
+local topbar = Instance.new("Frame",main)
+topbar.Size = UDim2.new(1,0,0,40)
+topbar.BackgroundColor3 = Color3.fromRGB(20,20,35)
+topbar.BorderSizePixel = 0
+Instance.new("UICorner",topbar).CornerRadius = UDim.new(0,12)
+
+local title = Instance.new("TextLabel",topbar)
+title.Size = UDim2.new(1,-10,1,0)
+title.Position = UDim2.new(0,10,0,0)
+title.BackgroundTransparency = 1
+title.Text = "⚡ GAME HOPPER v11"
+title.TextColor3 = Color3.fromRGB(255,255,255)
+title.TextSize = 15
+title.Font = Enum.Font.GothamBold
+title.TextXAlignment = Enum.TextXAlignment.Left
+
+-- // TABS
+local tabFrame = Instance.new("Frame",main)
+tabFrame.Size = UDim2.new(1,-20,0,32)
+tabFrame.Position = UDim2.new(0,10,0,48)
+tabFrame.BackgroundColor3 = Color3.fromRGB(20,20,30)
+tabFrame.BorderSizePixel = 0
+Instance.new("UICorner",tabFrame).CornerRadius = UDim.new(0,8)
+
+local function mkTab(txt, xpos)
+    local b = Instance.new("TextButton",tabFrame)
+    b.Size = UDim2.new(0.33,0,1,0)
+    b.Position = UDim2.new(xpos,0,0,0)
+    b.BackgroundColor3 = Color3.fromRGB(35,35,55)
+    b.BorderSizePixel = 0
+    b.Text = txt
+    b.TextColor3 = Color3.fromRGB(200,200,200)
+    b.TextSize = 12
+    b.Font = Enum.Font.GothamBold
+    Instance.new("UICorner",b).CornerRadius = UDim.new(0,6)
+    return b
+end
+
+local tabHopper = mkTab("🎮 Hopper", 0)
+local tabLista  = mkTab("📋 Jogos", 0.33)
+local tabConfig = mkTab("⚙️ Config", 0.66)
+
+-- // PÁGINAS
+local function mkPage()
+    local p = Instance.new("Frame",main)
+    p.Size = UDim2.new(1,-20,0,360)
+    p.Position = UDim2.new(0,10,0,88)
+    p.BackgroundTransparency = 1
+    p.Visible = false
+    return p
+end
+
+local pageHopper = mkPage()
+local pageLista  = mkPage()
+local pageConfig = mkPage()
+pageHopper.Visible = true
+
+local activeTab = tabHopper
+local function setTab(tab, page)
+    pageHopper.Visible = false
+    pageLista.Visible  = false
+    pageConfig.Visible = false
+    page.Visible = true
+    activeTab.BackgroundColor3 = Color3.fromRGB(35,35,55)
+    tab.BackgroundColor3 = Color3.fromRGB(70,70,200)
+    activeTab = tab
+end
+
+tabHopper.MouseButton1Click:Connect(function() setTab(tabHopper, pageHopper) end)
+tabLista.MouseButton1Click:Connect(function()  setTab(tabLista,  pageLista)  end)
+tabConfig.MouseButton1Click:Connect(function() setTab(tabConfig, pageConfig) end)
+tabHopper.BackgroundColor3 = Color3.fromRGB(70,70,200)
+
+-- // ── PAGE HOPPER ──
+local function mkLbl(parent, pos, col, size)
+    local l = Instance.new("TextLabel",parent)
+    l.Size = UDim2.new(1,0,0,size or 18)
+    l.Position = pos
+    l.BackgroundTransparency = 1
+    l.TextColor3 = col
+    l.TextSize = 12
+    l.Font = Enum.Font.Gotham
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextTruncate = Enum.TextTruncate.AtEnd
+    return l
+end
+
+local sLabel = mkLbl(pageHopper, UDim2.new(0,0,0,0),   Color3.fromRGB(180,180,180))
+local jLabel = mkLbl(pageHopper, UDim2.new(0,0,0,24),  Color3.fromRGB(130,130,220))
+local hLabel = mkLbl(pageHopper, UDim2.new(0,0,0,48),  Color3.fromRGB(100,220,100))
+local fLabel = mkLbl(pageHopper, UDim2.new(0,0,0,72),  Color3.fromRGB(220,180,80))
+local pLabel = mkLbl(pageHopper, UDim2.new(0,0,0,96),  Color3.fromRGB(180,100,220))
+
+-- // BARRA DE PROGRESSO
+local barBg = Instance.new("Frame",pageHopper)
+barBg.Size = UDim2.new(1,0,0,6)
+barBg.Position = UDim2.new(0,0,0,122)
+barBg.BackgroundColor3 = Color3.fromRGB(30,30,50)
+barBg.BorderSizePixel = 0
+Instance.new("UICorner",barBg).CornerRadius = UDim.new(0,3)
+
+local barFill = Instance.new("Frame",barBg)
+barFill.Size = UDim2.new(0,0,1,0)
+barFill.BackgroundColor3 = Color3.fromRGB(70,70,220)
+barFill.BorderSizePixel = 0
+Instance.new("UICorner",barFill).CornerRadius = UDim.new(0,3)
+
+local timerLabel = mkLbl(pageHopper, UDim2.new(0,0,0,134), Color3.fromRGB(150,150,150))
+
+-- // BOTÕES HOPPER
+local function mkBtn(parent, pos, size, col, txt)
+    local b = Instance.new("TextButton",parent)
+    b.Size = size
+    b.Position = pos
+    b.BackgroundColor3 = col
+    b.BorderSizePixel = 0
+    b.Text = txt
+    b.TextColor3 = Color3.fromRGB(255,255,255)
+    b.TextSize = 13
+    b.Font = Enum.Font.GothamBold
+    Instance.new("UICorner",b).CornerRadius = UDim.new(0,8)
+    return b
+end
+
+local btnIni  = mkBtn(pageHopper, UDim2.new(0,0,0,165),  UDim2.new(0.48,0,0,38), Color3.fromRGB(40,160,70),  "▶ INICIAR")
+local btnStop = mkBtn(pageHopper, UDim2.new(0.52,0,0,165),UDim2.new(0.48,0,0,38), Color3.fromRGB(180,40,40),  "■ PARAR")
+local btnNext = mkBtn(pageHopper, UDim2.new(0,0,0,210),   UDim2.new(1,0,0,32),    Color3.fromRGB(60,60,160),  "⏭ PRÓXIMO JOGO")
+local btnRef  = mkBtn(pageHopper, UDim2.new(0,0,0,250),   UDim2.new(1,0,0,32),    Color3.fromRGB(40,100,140), "🔄 ATUALIZAR LISTA")
+
+-- // ── PAGE LISTA ──
+local listaScroll = Instance.new("ScrollingFrame",pageLista)
+listaScroll.Size = UDim2.new(1,0,1,-40)
+listaScroll.Position = UDim2.new(0,0,0,0)
+listaScroll.BackgroundColor3 = Color3.fromRGB(15,15,25)
+listaScroll.BorderSizePixel = 0
+listaScroll.ScrollBarThickness = 4
+listaScroll.ScrollBarImageColor3 = Color3.fromRGB(70,70,200)
+listaScroll.CanvasSize = UDim2.new(0,0,0,0)
+Instance.new("UICorner",listaScroll).CornerRadius = UDim.new(0,8)
+
+local listaLayout = Instance.new("UIListLayout",listaScroll)
+listaLayout.Padding = UDim.new(0,4)
+listaLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local listaTitulo = mkLbl(pageLista, UDim2.new(0,0,1,-36), Color3.fromRGB(150,150,150))
+listaTitulo.Text = "Clique em ENTRAR para hop manual"
+listaTitulo.TextXAlignment = Enum.TextXAlignment.Center
+
+local btnLimparLista = mkBtn(pageLista, UDim2.new(0,0,1,-32), UDim2.new(1,0,0,28), Color3.fromRGB(80,30,30), "🗑 Limpar Lista")
+
+-- // ── PAGE CONFIG ──
+local function mkSliderRow(parent, ypos, label, min, max, current, callback)
+    local row = Instance.new("Frame",parent)
+    row.Size = UDim2.new(1,0,0,50)
+    row.Position = UDim2.new(0,0,0,ypos)
+    row.BackgroundColor3 = Color3.fromRGB(20,20,32)
+    row.BorderSizePixel = 0
+    Instance.new("UICorner",row).CornerRadius = UDim.new(0,6)
+
+    local lbl = Instance.new("TextLabel",row)
+    lbl.Size = UDim2.new(1,-70,0,20)
+    lbl.Position = UDim2.new(0,8,0,4)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = label .. ": " .. tostring(current)
+    lbl.TextColor3 = Color3.fromRGB(200,200,200)
+    lbl.TextSize = 11
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    local track = Instance.new("Frame",row)
+    track.Size = UDim2.new(1,-16,0,6)
+    track.Position = UDim2.new(0,8,0,30)
+    track.BackgroundColor3 = Color3.fromRGB(30,30,50)
+    track.BorderSizePixel = 0
+    Instance.new("UICorner",track).CornerRadius = UDim.new(0,3)
+
+    local fill = Instance.new("Frame",track)
+    fill.Size = UDim2.new((current-min)/(max-min),0,1,0)
+    fill.BackgroundColor3 = Color3.fromRGB(70,70,200)
+    fill.BorderSizePixel = 0
+    Instance.new("UICorner",fill).CornerRadius = UDim.new(0,3)
+
+    local dragging = false
+    track.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+        end
+    end)
+    track.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+    game:GetService("UserInputService").InputChanged:Connect(function(inp)
+        if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
+            local rel = math.clamp((inp.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+            local val = math.floor(min + rel * (max - min))
+            fill.Size = UDim2.new(rel, 0, 1, 0)
+            lbl.Text = label .. ": " .. tostring(val)
+            callback(val)
+        end
+    end)
+
+    return row
+end
+
+mkSliderRow(pageConfig, 0,   "Min Players",  1,   500,   CFG.MIN_PLAYERS,  function(v) CFG.MIN_PLAYERS = v end)
+mkSliderRow(pageConfig, 58,  "Max Players",  1000,500000,CFG.MAX_PLAYERS,  function(v) CFG.MAX_PLAYERS = v end)
+mkSliderRow(pageConfig, 116, "Hop Delay(s)", 3,   60,    CFG.HOP_DELAY,    function(v) CFG.HOP_DELAY = v end)
+
+-- // ════════════════════════════════════════════
+-- // LÓGICA UI
+-- // ════════════════════════════════════════════
+
+local hopTimer = 0
+local hopMax   = CFG.HOP_DELAY
+local skipFlag = false
+
+local function updUI()
+    sLabel.Text = "Status: " .. (hopAtivo and "🟢 Ativo" or "🔴 Parado")
+    jLabel.Text = "Jogo atual: " .. jogoAtual
+    hLabel.Text = "Total Hops: " .. totalHops
+    fLabel.Text = "Fila: " .. #jogosFila .. " jogos"
+    pLabel.Text = "Players min/max: " .. CFG.MIN_PLAYERS .. " / " .. CFG.MAX_PLAYERS
+    timerLabel.Text = "Próximo hop: " .. math.max(0, math.floor(hopMax - hopTimer)) .. "s"
+    barFill.Size = UDim2.new(math.clamp(hopTimer/hopMax,0,1),0,1,0)
+end
+
+-- // ADICIONA CARD NA LISTA
+local cardCount = 0
+local function addCard(jogo)
+    cardCount = cardCount + 1
+    local card = Instance.new("Frame",listaScroll)
+    card.Size = UDim2.new(1,-8,0,52)
+    card.BackgroundColor3 = Color3.fromRGB(20,20,32)
+    card.BorderSizePixel = 0
+    card.LayoutOrder = cardCount
+    Instance.new("UICorner",card).CornerRadius = UDim.new(0,6)
+
+    local nome = Instance.new("TextLabel",card)
+    nome.Size = UDim2.new(1,-90,0,22)
+    nome.Position = UDim2.new(0,8,0,4)
+    nome.BackgroundTransparency = 1
+    nome.Text = jogo.nome
+    nome.TextColor3 = Color3.fromRGB(220,220,255)
+    nome.TextSize = 12
+    nome.Font = Enum.Font.GothamBold
+    nome.TextXAlignment = Enum.TextXAlignment.Left
+    nome.TextTruncate = Enum.TextTruncate.AtEnd
+
+    local players = Instance.new("TextLabel",card)
+    players.Size = UDim2.new(1,-90,0,18)
+    players.Position = UDim2.new(0,8,0,28)
+    players.BackgroundTransparency = 1
+    players.Text = "👥 " .. jogo.jogadores .. " players"
+    players.TextColor3 = Color3.fromRGB(130,200,130)
+    players.TextSize = 11
+    players.Font = Enum.Font.Gotham
+    players.TextXAlignment = Enum.TextXAlignment.Left
+
+    local btnEntrar = Instance.new("TextButton",card)
+    btnEntrar.Size = UDim2.new(0,76,0,36)
+    btnEntrar.Position = UDim2.new(1,-82,0.5,-18)
+    btnEntrar.BackgroundColor3 = Color3.fromRGB(50,130,220)
+    btnEntrar.BorderSizePixel = 0
+    btnEntrar.Text = "ENTRAR"
+    btnEntrar.TextColor3 = Color3.fromRGB(255,255,255)
+    btnEntrar.TextSize = 11
+    btnEntrar.Font = Enum.Font.GothamBold
+    Instance.new("UICorner",btnEntrar).CornerRadius = UDim.new(0,6)
+
+    btnEntrar.MouseButton1Click:Connect(function()
+        jogoAtual = jogo.nome
+        updUI()
+        print(string.format("[H] Manual hop → %s", jogo.nome))
+        pcall(TS.Teleport, TS, jogo.placeId, LP)
+    end)
+
+    listaScroll.CanvasSize = UDim2.new(0,0,0, cardCount * 56)
+end
+
+-- // ATUALIZA LISTA UI
+local function atualizarListaUI()
+    for _, c in ipairs(listaScroll:GetChildren()) do
+        if c:IsA("Frame") then c:Destroy() end
+    end
+    cardCount = 0
+    for _, j in ipairs(jogosLista) do
+        addCard(j)
+    end
+    listaTitulo.Text = #jogosLista .. " jogos encontrados"
+end
+
+-- // HOP
+local function hopParaJogo(jogo)
+    jogoAtual = jogo.nome
+    updUI()
+    print(string.format("[H] → %s | %d players", jogo.nome, jogo.jogadores))
+    for t = 1, CFG.MAX_TENTATIVAS do
+        if not hopAtivo then return false end
+        local ok, err = pcall(TS.Teleport, TS, jogo.placeId, LP)
+        if ok then
+            totalHops = totalHops + 1
+            updUI()
+            print(string.format("[H] ✓ Hop #%d — fuck yeah boss man!", totalHops))
+            return true
+        end
+        warn(string.format("[H] T%d: %s", t, tostring(err)))
+        task.wait(CFG.DELAY_ENTRE_TENTATIVAS or 2)
+    end
+    return false
+end
+
+-- // TIMER LOOP
+task.spawn(function()
+    while _G.HOPPER_ATIVO do
+        task.wait(0.1)
+        if hopAtivo then
+            hopTimer = hopTimer + 0.1
+            hopMax = CFG.HOP_DELAY
+            updUI()
+        end
+    end
+end)
+
+-- // LOOP PRINCIPAL
+local function iniciarLoop()
+    task.spawn(function()
+        print("[H] Iniciado — fuck yeah boss man.")
+
+        if #jogosFila == 0 then
+            buscarJogos()
+            atualizarListaUI()
+        end
+
+        while hopAtivo and _G.HOPPER_ATIVO do
+            updUI()
+
+            if #jogosFila == 0 then
+                print("[H] Fila vazia — reabastecendo...")
+                buscarJogos()
+                atualizarListaUI()
+                task.wait(2)
+                continue
+            end
+
+            local jogo = table.remove(jogosFila, 1)
+            hopTimer = 0
+            local ok = hopParaJogo(jogo)
+
+            if ok then
+                -- // countdown
+                local elapsed = 0
+                while elapsed < CFG.HOP_DELAY and hopAtivo and not skipFlag do
+                    task.wait(0.1)
+                    elapsed = elapsed + 0.1
+                    hopTimer = elapsed
+                    updUI()
+                end
+                skipFlag = false
+            else
+                task.wait(0.5)
+            end
+        end
+
+        hopAtivo = false
+        updUI()
+        print("[H] Loop encerrado.")
+    end)
+end
+
+-- // BOTÕES
+btnIni.MouseButton1Click:Connect(function()
+    if hopAtivo then return end
+    hopAtivo = true
+    hopTimer = 0
+    updUI()
+    iniciarLoop()
+end)
+
+btnStop.MouseButton1Click:Connect(function()
+    hopAtivo = false
+    _G.HOPPER_ATIVO = false
+    jogoAtual = "—"
+    updUI()
+    print(string.format("[H] Parado. Total: %d hops", totalHops))
+end)
+
+btnNext.MouseButton1Click:Connect(function()
+    if hopAtivo then
+        skipFlag = true
+        print("[H] Pulando pro próximo...")
+    end
+end)
+
+btnRef.MouseButton1Click:Connect(function()
+    task.spawn(function()
+        print("[H] Atualizando lista...")
+        jogosFila = {}
+        jogosLista = {}
+        buscarJogos()
+        atualizarListaUI()
+    end)
+end)
+
+btnLimparLista.MouseButton1Click:Connect(function()
+    jogosLista = {}
+    jogosFila  = {}
+    atualizarListaUI()
+end)
+
+updUI()
+print("BY RC7 REMAKE TEAM ON DISCORD")
